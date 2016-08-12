@@ -1,0 +1,6 @@
+[package]
+name = "feledger"
+version = "0.1.0"
+authors = ["Elliot Smith <elliot.smith91@gmail.com>"]
+
+[dependencies]
