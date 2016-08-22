@@ -10,7 +10,7 @@ pub struct Date {
 }
 
 // Account struct
-#[derive(Eq,PartialEq,Debug,Clone)]
+#[derive(Eq,PartialEq,Debug,Clone,Hash)]
 pub struct Account {
     pub label: String,
 }
@@ -18,13 +18,8 @@ pub struct Account {
 // Currency enum. Either a prefixed or suffixed string to acompany an amount in
 // a value.
 #[derive(Eq,PartialEq,Debug,Clone,Hash)]
-pub enum Currency {
-    Prefix {
-        symbol: String,
-    },
-    Suffix {
-        symbol: String,
-    },
+pub struct Currency {
+    pub symbol: String,
 }
 
 // Value Struct. Used for dollars btu also other items which may be recorded in
@@ -53,16 +48,32 @@ pub struct Transaction {
 impl Transaction {
     pub fn balance(&self) -> Result<(), &'static str> {
         //Loop through the entries and ensure the total balance is 0 in all present currencies 
-        let mut currency_table = HashMap::new();
+        let mut currency_table : HashMap<&Currency, f32> = HashMap::new();
+
         for entry in &self.entries {
             let currency = currency_table.entry(&entry.value.currency).or_insert(0f32);
             *currency += entry.value.amount;
         }
 
-        for (key, value) in currency_table {
+        for (_, value) in currency_table {
             if value > 0f32 {
                 return Err("Transaction does not balance!");
             }
+        }
+
+        return Ok(());
+    }
+
+    pub fn apply_to<'a>(&'a self, balance_table : &mut HashMap<&'a Account, Value>) -> Result<(), &'static str> {
+
+        for entry in &self.entries {
+            let account = balance_table.entry(&entry.account)
+                .or_insert(Value { currency: entry.value.currency.clone(), amount: 0f32});
+            if account.currency != entry.value.currency {
+                return Err("Multiple Currencies in one account!");
+            }
+
+            (*account).amount += entry.value.amount;
         }
 
         return Ok(());
