@@ -1,7 +1,7 @@
 //! Parser component of FeLedger
 //! This file holds the types and functions used to read ledger files
 use std::str::{ FromStr, from_utf8 };
-use data::{ Date, Currency, Value, Account, Entry };
+use data::{ Date, Currency, Value, Account, Entry, Transaction };
 use nom::{self, is_digit, alpha};
 
 
@@ -64,22 +64,6 @@ named!(value<f32>, map!(
 	)
 );
 
-#[test]
-fn test_value_parse() {
-	assert_eq!(nom::IResult::Done(&[][..], 100f32), value(b"100.0"));
-}
-
-#[test]
-fn test_value_parse_no_decimal() {
-	assert_eq!(nom::IResult::Done(&[][..], 100f32), value(b"100"));
-}
-
-#[test]
-fn test_value_parse_with_decimal() {
-	assert_eq!(nom::IResult::Done(&[][..], 100.1f32), value(b"100.1"));
-}
-
-
 named!(sign<f32>, map!(opt!(tag!("-")), |v| {
     match v {
         Some(_) => return -1f32,
@@ -96,31 +80,11 @@ fn test_negative() {
 
 named!(symbol, take_until_either!("-0123456789."));
 
-#[test]
-fn test_gets_symbol() {
-    let expected : &[u8] = b"$";
-    let result = symbol(b"$-100.1");
-    match result {
-        nom::IResult::Done(_, t) => assert_eq!(t, expected),
-        nom::IResult::Error(_) => assert!(false),
-        nom::IResult::Incomplete(_) => assert!(false)
-    };
-}
-
 named!(transactional_value<Value>, chain!(
         sym: symbol ~ 
         val: signed_value,
         || Value{ amount: val, currency: Currency{ symbol: from_utf8(sym).unwrap().to_string() }}
         ));
-
-
-#[test]
-fn test_gets_whole_value() {
-    let expected = Value{ amount: -100.1f32, currency: Currency{ symbol: "$".to_string() }};
-    let result = transactional_value(b"$-100.1");
-    assert_eq!(nom::IResult::Done(&[][..], expected), result);
-}
-
 
 named!(sub_account, recognize!(chain!(tag!(":") ~ alpha, || {})));
 
@@ -132,6 +96,87 @@ named!(account<Account>, map!(recognize!(
         )),
         |v| Account{ label: from_utf8(v).unwrap().to_string()} 
 ));
+
+named!(single_entry<Entry>, chain!(
+    tag!(" ") ~ // leading space
+    many1!(tag!(" ")) ~ // at least 2 spaces total
+    label: account ~
+    tag!(" ") ~
+    many1!(tag!(" ")) ~ // 2 spaces between account and value
+    val: transactional_value,
+    || Entry{ account: label, value: val}
+    ));
+
+
+// Multi line parser
+
+named!(entry_line<Entry>, chain!(
+        t: single_entry ~
+        take_until_and_consume!("\n"),
+        || t
+        ));
+
+named!(multiple_entries< Vec<Entry> >, many1!(entry_line));
+
+// Comment and date line
+
+named!(header<Transaction>, chain!(
+        d: date ~
+        many1!(tag!(" ")) ~
+        comment: take_until!("\n") ~
+        tag!("\n"),
+        || Transaction{ date: d, comment: from_utf8(comment).unwrap().to_string(), entries: Vec::new() }
+        ));
+
+named!(transaction<Transaction>, chain!(
+        mut t: header ~
+        entries: multiple_entries ~
+        many1!(tag!("\n")), // Separating new line
+        || {
+            t.entries = entries;
+            return t;
+        }));
+
+named!(pub parse_file< Vec<Transaction> >, chain!(
+        many0!(tag!("\n")) ~
+        t: many1!(transaction),
+        || t
+        ));
+
+// Tests
+#[test]
+fn test_value_parse() {
+	assert_eq!(nom::IResult::Done(&[][..], 100f32), value(b"100.0"));
+}
+
+#[test]
+fn test_value_parse_no_decimal() {
+	assert_eq!(nom::IResult::Done(&[][..], 100f32), value(b"100"));
+}
+
+#[test]
+fn test_value_parse_with_decimal() {
+	assert_eq!(nom::IResult::Done(&[][..], 100.1f32), value(b"100.1"));
+}
+
+#[test]
+fn test_gets_symbol() {
+    let expected : &[u8] = b"$";
+    let result = symbol(b"$-100.1");
+    match result {
+        nom::IResult::Done(_, t) => assert_eq!(t, expected),
+        nom::IResult::Error(_) => assert!(false),
+        nom::IResult::Incomplete(_) => assert!(false)
+    };
+}
+
+#[test]
+fn test_gets_whole_value() {
+    let expected = Value{ amount: -100.1f32, currency: Currency{ symbol: "$".to_string() }};
+    let result = transactional_value(b"$-100.1");
+    assert_eq!(nom::IResult::Done(&[][..], expected), result);
+}
+
 
 #[test]
 fn test_gets_account() {
@@ -147,17 +192,6 @@ fn test_gets_account_with_sub() {
     assert_eq!(nom::IResult::Done(&[][..], expected), result);
 }
 
-
-named!(single_entry<Entry>, chain!(
-    tag!(" ") ~ // leading space
-    many1!(tag!(" ")) ~ // at least 2 spaces total
-    label: account ~
-    tag!(" ") ~
-    many1!(tag!(" ")) ~ // 2 spaces between account and value
-    val: transactional_value,
-    || Entry{ account: label, value: val}
-    ));
-
 #[test]
 fn test_gets_whole_line() {
     let expected = Entry{ 
@@ -170,5 +204,84 @@ fn test_gets_whole_line() {
         }
     };
     let result = single_entry(b"  test:pie  $100.1");
+    assert_eq!(nom::IResult::Done(&[][..], expected), result);
+}
+
+#[test]
+fn test_gets_whole_line_with_ending() {
+    let expected = Entry{ 
+        account: Account{label: "test:pie".to_string()},
+        value: Value{
+            amount: 100.1f32,
+            currency: Currency {
+                symbol: "$".to_string()
+            }
+        }
+    };
+    let result = entry_line(b"  test:pie  $100.1  \n");
+    assert_eq!(nom::IResult::Done(&[][..], expected), result);
+}
+
+#[test]
+fn test_multi_line() {
+    let expected = Entry{ 
+        account: Account{label: "test:pie".to_string()},
+        value: Value{
+            amount: 100.1f32,
+            currency: Currency {
+                symbol: "$".to_string()
+            }
+        }
+    };
+    let expected2 = Entry{ 
+        account: Account{label: "test:cat".to_string()},
+        value: Value{
+            amount: -100.1f32,
+            currency: Currency {
+                symbol: "$".to_string()
+            }
+        }
+    };
+    let expected_vec : Vec<Entry> = vec!(expected, expected2);
+    let result = multiple_entries(b"  test:pie  $100.1  \n  test:cat  $-100.1  \n");
+    assert_eq!(nom::IResult::Done(&[][..], expected_vec), result);
+}
+#[test]
+fn test_header_line() {
+    let expected = Transaction{
+        date: Date{ year: 2016, month:1, day: 10},
+        comment: "This is a test entry".to_string(),
+        entries: Vec::new()
+    };
+    let result = header(b"2016/01/10 This is a test entry\n");
+    assert_eq!(nom::IResult::Done(&[][..], expected), result);
+}
+
+#[test]
+fn test_full_transaction() {
+    let expected1 = Entry{ 
+        account: Account{label: "test:pie".to_string()},
+        value: Value{
+            amount: 100.1f32,
+            currency: Currency {
+                symbol: "$".to_string()
+            }
+        }
+    };
+    let expected2 = Entry{ 
+        account: Account{label: "test:cat".to_string()},
+        value: Value{
+            amount: -100.1f32,
+            currency: Currency {
+                symbol: "$".to_string()
+            }
+        }
+    };
+    let expected = Transaction{
+        date: Date{ year: 2016, month:1, day: 10},
+        comment: "This is a test entry".to_string(),
+        entries: vec!(expected1, expected2)
+    };
+    let result = transaction(b"2016/01/10 This is a test entry\n  test:pie  $100.1\n  test:cat  $-100.1\n\n");
     assert_eq!(nom::IResult::Done(&[][..], expected), result);
 }
